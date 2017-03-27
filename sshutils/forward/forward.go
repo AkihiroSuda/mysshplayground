@@ -4,8 +4,7 @@ package forward
 import (
 	"io"
 	"net"
-
-	"github.com/Sirupsen/logrus"
+	"sync"
 
 	sshutils ".."
 )
@@ -46,13 +45,29 @@ func (f *Forwarder) Run() error {
 	return nil
 }
 
+type halfCloser interface {
+	CloseRead() error
+	CloseWrite() error
+}
+
+// see docker/libnetwork/cmd/proxy/tcp_proxy.go for implementation of
+// half-close. (docker/libnetwork#1598, docker/libnetwork#1617)
 func copier(localConn, remoteConn net.Conn) {
+	var wg sync.WaitGroup
 	var broker = func(to, from net.Conn) {
-		_, err := io.Copy(to, from)
-		if err != nil {
-			logrus.Error(err)
+		io.Copy(to, from)
+		if xFrom, ok := from.(halfCloser); ok {
+			xFrom.CloseRead()
 		}
+		if xTo, ok := to.(halfCloser); ok {
+			xTo.CloseWrite()
+		}
+		wg.Done()
 	}
+	wg.Add(2)
 	go broker(localConn, remoteConn)
 	go broker(remoteConn, localConn)
+	wg.Wait()
+	localConn.Close()
+	remoteConn.Close()
 }
